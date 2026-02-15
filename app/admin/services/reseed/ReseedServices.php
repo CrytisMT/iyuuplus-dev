@@ -81,6 +81,16 @@ class ReseedServices
      */
     protected string $auto_check = '';
     /**
+     * qBittorrent跳校验
+     * @var string
+     */
+    protected string $qb_skip_check = '';
+    /**
+     * 最小种子体积（字节）
+     * @var int
+     */
+    protected int $min_torrent_size = 0;
+    /**
      * 辅种完毕后的通知数据
      * @var NotifyData
      */
@@ -157,6 +167,16 @@ class ReseedServices
                 $hashDict = $torrentList['hashString'];   // 哈希目录字典
                 $total = count($hashDict);
                 echo "{$this->clientModel->title} 下载器排除目录后，剩余做种哈希总数：{$total}" . PHP_EOL;
+            }
+
+            $torrentList = $this->minSizeFilter($torrentList);
+            if (empty($torrentList)) {
+                echo "{$this->clientModel->title} 下载器体积过滤后，做种哈希为空" . PHP_EOL;
+                continue;
+            } else {
+                $hashDict = $torrentList['hashString'];
+                $total = count($hashDict);
+                echo "{$this->clientModel->title} 下载器体积过滤后，剩余做种哈希总数：{$total}" . PHP_EOL;
             }
 
             // 调度事件：当前客户端辅种开始前
@@ -262,6 +282,48 @@ class ReseedServices
         $hashArray['hash'] = $json;
         $hashArray['sha1'] = sha1($json);
         $hashArray['hashString'] = $rs;
+        if (isset($hashArray[Clients::TORRENT_LIST])) {
+            $hashArray[Clients::TORRENT_LIST] = array_intersect_key($hashArray[Clients::TORRENT_LIST], $rs);
+        }
+        return $hashArray;
+    }
+
+    /**
+     * 种子体积过滤器
+     * @param array $hashArray
+     * @return array|null
+     */
+    protected function minSizeFilter(array $hashArray): ?array
+    {
+        if ($this->min_torrent_size <= 0) {
+            return $hashArray;
+        }
+
+        $hashDict = $hashArray['hashString'];
+        $torrentList = $hashArray[Clients::TORRENT_LIST] ?? [];
+        $rs = [];
+        foreach ($hashDict as $hash => $path) {
+            $size = (int)$this->extractTorrentSize($torrentList[$hash] ?? []);
+            if ($size >= $this->min_torrent_size) {
+                $rs[$hash] = $path;
+                continue;
+            }
+            echo "种子哈希：{$hash} 体积过小，已过滤（{$size} B）" . PHP_EOL;
+        }
+
+        if (empty($rs)) {
+            return null;
+        }
+
+        $info_hash = array_keys($rs);
+        sort($info_hash);
+        $json = json_encode($info_hash, JSON_UNESCAPED_UNICODE);
+        $hashArray['hash'] = $json;
+        $hashArray['sha1'] = sha1($json);
+        $hashArray['hashString'] = $rs;
+        if (isset($hashArray[Clients::TORRENT_LIST])) {
+            $hashArray[Clients::TORRENT_LIST] = array_intersect_key($hashArray[Clients::TORRENT_LIST], $rs);
+        }
         return $hashArray;
     }
 
@@ -362,6 +424,8 @@ class ReseedServices
                 $reseedPayload = new ReseedPayload();
                 $reseedPayload->marker = $this->downloaderMarkerEnums->value;
                 $reseedPayload->auto_check = $this->auto_check;
+                $reseedPayload->qb_skip_check = $this->qb_skip_check;
+                $reseedPayload->source_info_hash = $infohash;
 
                 // 主辅分离
                 if ($this->masterModel) {
@@ -442,6 +506,8 @@ class ReseedServices
         $notify_channel = $parameter['notify_channel'] ?? '';
         $marker = DownloaderMarkerEnums::from($parameter['marker'] ?? DownloaderMarkerEnums::Empty->value);
         $auto_check = $parameter['auto_check'] ?? '';
+        $qb_skip_check = $parameter['qb_skip_check'] ?? '';
+        $min_torrent_size_mb = max(0.0, (float)($parameter['min_torrent_size_mb'] ?? 0));
 
         // 主辅种下载的主键id
         $master = $parameter['master'] ?? null;
@@ -456,5 +522,22 @@ class ReseedServices
         $this->notifyEnum = NotifyChannelEnums::tryFrom($notify_channel);
         $this->downloaderMarkerEnums = $marker;
         $this->auto_check = $auto_check;
+        $this->qb_skip_check = $qb_skip_check;
+        $this->min_torrent_size = (int)round($min_torrent_size_mb * 1024 * 1024);
+    }
+
+    /**
+     * 解析种子体积
+     * @param array $torrent
+     * @return int
+     */
+    private function extractTorrentSize(array $torrent): int
+    {
+        foreach (['total_size', 'size', 'totalSize', 'sizeWhenDone'] as $key) {
+            if (isset($torrent[$key])) {
+                return (int)$torrent[$key];
+            }
+        }
+        return 0;
     }
 }

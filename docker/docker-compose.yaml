@@ -3,6 +3,8 @@ services:
   iyuuplus-dev:
     stdin_open: true
     tty: true
+    environment:
+      - IYUU_REPO_URL=https://github.com/CrytisMT/iyuuplus-dev.git
     volumes:
       - /root/iyuu:/iyuu
       - /root/data:/data

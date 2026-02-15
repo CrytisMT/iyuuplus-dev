@@ -18,6 +18,8 @@ use Iyuu\BittorrentClient\Contracts\Torrent as TorrentContract;
 use Iyuu\SiteManager\Config;
 use Iyuu\SiteManager\Contracts\Torrent;
 use Iyuu\SiteManager\Spider\Helper;
+use Rhilip\Bencode\Bencode;
+use Rhilip\Bencode\ParseException;
 use support\Log;
 use Throwable;
 use Webman\Event\Event;
@@ -147,9 +149,11 @@ class ReseedDownloadServices
             $bittorrentClients = ClientServices::createBittorrent($clientModel);
             $contractsTorrent = new TorrentContract($response->payload, $response->metadata);
             $contractsTorrent->savePath = $reseed->directory;
+            $reseedPayload = $reseed->getReseedPayload();
 
             // 调度事件：把种子发送给下载器之前
             $step = '4.调度事件，种子发送给下载器之前';
+            self::validateBeforeSend($contractsTorrent, $bittorrentClients, $clientModel, $reseed, $reseedPayload);
             self::sendBefore($contractsTorrent, $bittorrentClients, $clientModel, $reseed);
             Event::dispatch(EventReseedEnums::reseed_torrent_send_before->value, [$contractsTorrent, $bittorrentClients, $clientModel, $reseed]);
 
@@ -203,6 +207,9 @@ class ReseedDownloadServices
             case ClientEnums::qBittorrent;
                 $contractsTorrent->parameters['autoTMM'] = 'false'; // 关闭自动种子管理
                 $contractsTorrent->parameters['paused'] = 'true';   // 添加任务校验后是否暂停
+                if ($reseedPayload->isQbSkipCheck()) {
+                    $contractsTorrent->parameters['skip_checking'] = 'true';
+                }
                 if (DownloaderMarkerEnums::Category === $markerEnum) {
                     $contractsTorrent->parameters['category'] = 'IYUU' . ReseedSubtypeEnums::text($reseed->getSubtypeEnums());   // 添加分类标签
                 }
@@ -238,7 +245,7 @@ class ReseedDownloadServices
                                 }
 
                                 // 发送校验命令
-                                if ($reseedPayload->isAutoCheck()) {
+                                if ($reseedPayload->isAutoCheck() && !$reseedPayload->isQbSkipCheck()) {
                                     $bittorrentClients->recheck($reseed->info_hash);
                                 }
                                 $retry = 0;
@@ -254,5 +261,142 @@ class ReseedDownloadServices
         } catch (Throwable $throwable) {
             Log::error('把种子发送给下载器之后，做一些操作，异常啦：' . $throwable->getMessage());
         }
+    }
+
+    /**
+     * 下发前校验
+     * @param TorrentContract $contractsTorrent
+     * @param Clients $bittorrentClients
+     * @param Client $clientModel
+     * @param Reseed $reseed
+     * @param \app\model\payload\ReseedPayload $reseedPayload
+     * @return void
+     */
+    private static function validateBeforeSend(TorrentContract $contractsTorrent, Clients $bittorrentClients, Client $clientModel, Reseed $reseed, \app\model\payload\ReseedPayload $reseedPayload): void
+    {
+        if ($clientModel->getClientEnums() !== ClientEnums::qBittorrent || !$reseedPayload->isQbSkipCheck()) {
+            return;
+        }
+
+        if (!$bittorrentClients instanceof \Iyuu\BittorrentClient\Driver\qBittorrent\Client) {
+            throw new InvalidArgumentException('qBittorrent下载器实例异常，无法执行跳校验严格比对');
+        }
+
+        $sourceInfoHash = trim($reseedPayload->source_info_hash);
+        if ($sourceInfoHash === '') {
+            throw new InvalidArgumentException('缺少源种子infohash，已拦截qB跳校验任务');
+        }
+
+        [$targetTitle, $targetSize, $targetFiles] = self::parseTorrentMetadata($contractsTorrent->payload);
+        [$sourceTitle, $sourceSize, $sourceFiles] = self::fetchQbSourceMeta($bittorrentClients, $sourceInfoHash);
+
+        if ($sourceTitle !== $targetTitle) {
+            throw new InvalidArgumentException("qB跳校验已拦截：标题不一致（源：{$sourceTitle}，目标：{$targetTitle}）");
+        }
+        if ($sourceSize !== $targetSize) {
+            throw new InvalidArgumentException("qB跳校验已拦截：大小不一致（源：{$sourceSize}，目标：{$targetSize}）");
+        }
+        if ($sourceFiles !== $targetFiles) {
+            throw new InvalidArgumentException('qB跳校验已拦截：文件列表不一致');
+        }
+
+        Log::info("qB跳校验严格比对通过：{$reseed->info_hash} <= {$sourceInfoHash}");
+    }
+
+    /**
+     * 解析种子元数据
+     * @param string $payload
+     * @return array{0:string,1:int,2:array}
+     */
+    private static function parseTorrentMetadata(string $payload): array
+    {
+        try {
+            $torrent = Bencode::decode($payload);
+        } catch (ParseException $exception) {
+            throw new InvalidArgumentException('目标种子元数据解析失败：' . $exception->getMessage());
+        }
+
+        if (empty($torrent['info']) || !is_array($torrent['info'])) {
+            throw new InvalidArgumentException('目标种子元数据缺少info字段');
+        }
+        $info = $torrent['info'];
+        $title = (string)($info['name'] ?? '');
+        if ($title === '') {
+            throw new InvalidArgumentException('目标种子元数据缺少标题');
+        }
+
+        $files = [];
+        $size = 0;
+        if (!empty($info['files']) && is_array($info['files'])) {
+            foreach ($info['files'] as $file) {
+                if (!is_array($file)) {
+                    continue;
+                }
+                $length = (int)($file['length'] ?? 0);
+                $parts = $file['path'] ?? [];
+                $path = is_array($parts) ? implode('/', $parts) : (string)$parts;
+                $path = self::normalizePath($path);
+                $files[] = $path . '|' . $length;
+                $size += $length;
+            }
+        } else {
+            $length = (int)($info['length'] ?? 0);
+            $files[] = self::normalizePath($title) . '|' . $length;
+            $size = $length;
+        }
+        sort($files);
+        return [$title, $size, $files];
+    }
+
+    /**
+     * 获取qB源种子元数据
+     * @param \Iyuu\BittorrentClient\Driver\qBittorrent\Client $qb
+     * @param string $hash
+     * @return array{0:string,1:int,2:array}
+     */
+    private static function fetchQbSourceMeta(\Iyuu\BittorrentClient\Driver\qBittorrent\Client $qb, string $hash): array
+    {
+        $list = json_decode((string)$qb->getData('torrent_list', ['hashes' => $hash]), true);
+        if (empty($list) || !is_array($list) || empty($list[0])) {
+            throw new InvalidArgumentException("qB跳校验已拦截：源种子不存在 {$hash}");
+        }
+        $item = $list[0];
+        $title = (string)($item['name'] ?? '');
+        $size = (int)($item['size'] ?? $item['total_size'] ?? 0);
+        if ($title === '' || $size <= 0) {
+            throw new InvalidArgumentException('qB跳校验已拦截：源种子标题或大小读取失败');
+        }
+
+        $filesRaw = json_decode((string)$qb->getData('torrent_files', ['hash' => $hash]), true);
+        if (!is_array($filesRaw)) {
+            throw new InvalidArgumentException('qB跳校验已拦截：源种子文件列表读取失败');
+        }
+
+        $files = [];
+        foreach ($filesRaw as $file) {
+            if (!is_array($file)) {
+                continue;
+            }
+            $path = (string)($file['name'] ?? $file['path'] ?? '');
+            $path = self::normalizePath($path);
+            $titlePrefix = self::normalizePath($title) . '/';
+            if (str_starts_with($path, $titlePrefix)) {
+                $path = substr($path, strlen($titlePrefix));
+            }
+            $files[] = $path . '|' . (int)($file['size'] ?? 0);
+        }
+        sort($files);
+
+        return [$title, $size, $files];
+    }
+
+    /**
+     * 规范化路径
+     * @param string $path
+     * @return string
+     */
+    private static function normalizePath(string $path): string
+    {
+        return trim(str_replace('\\', '/', $path), '/');
     }
 }

@@ -135,6 +135,21 @@ class ReseedTemplate extends CrontabAbstract
     </div>
     <div class="layui-form-mid layui-text-em">此功能在TR以及低版本QB中属于默认行为，是否勾选都会自动校验</div>
 </div>
+<div class="layui-form-item">
+    <label class="layui-form-label">qB跳校验</label>
+    <div class="layui-input-inline layui-input-wrap">
+        <input type="checkbox" name="parameter[qb_skip_check]" lay-skin="switch" title="ON|OFF" lay-filter="qb_skip_check" id="qb_skip_check">
+    </div>
+    <div class="layui-form-mid layui-text-em">仅 qBittorrent 生效，且会强制要求标题/文件列表/总大小完全一致</div>
+</div>
+<div class="layui-form-item">
+    <label class="layui-form-label">最小体积</label>
+    <div class="layui-input-inline">
+        <input type="number" min="0" step="1" name="parameter[min_torrent_size_mb]" id="min_torrent_size_mb" placeholder="0" class="layui-input">
+    </div>
+    <div class="layui-form-mid">MB</div>
+    <div class="layui-form-mid layui-text-em">过滤体积较小的源种子，0 表示不限制</div>
+</div>
 <!-- 辅种站点模板 -->
 <script type="text/html" id="sites_tpl">
 <div class="layui-col-xs12 layui-col-space10">

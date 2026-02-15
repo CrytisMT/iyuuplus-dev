@@ -92,6 +92,14 @@ update_render_callable.push(
 
                             // 自动校验
                             $('#auto_check').attr("checked", Boolean(parameter['auto_check']));
+
+                            // qB 跳校验
+                            $('#qb_skip_check').attr("checked", Boolean(parameter['qb_skip_check']));
+
+                            // 最小种子体积（MB）
+                            if (undefined !== parameter['min_torrent_size_mb']) {
+                                $('#min_torrent_size_mb').val(parameter['min_torrent_size_mb']);
+                            }
                         }
                         form.render();
                     });

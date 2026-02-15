@@ -23,6 +23,18 @@ class ReseedPayload
     public string $auto_check = '';
 
     /**
+     * qBittorrent 跳过校验
+     * @var string
+     */
+    public string $qb_skip_check = '';
+
+    /**
+     * 源种子infohash（用于严格比对）
+     * @var string
+     */
+    public string $source_info_hash = '';
+
+    /**
      * @param string|null $payload
      */
     public function __construct(string $payload = null)
@@ -44,6 +56,15 @@ class ReseedPayload
     public function isAutoCheck(): bool
     {
         return Utils::booleanParse($this->auto_check);
+    }
+
+    /**
+     * 判断是否启用 qB 跳校验
+     * @return bool
+     */
+    public function isQbSkipCheck(): bool
+    {
+        return Utils::booleanParse($this->qb_skip_check);
     }
 
     /**
